@@ -1,0 +1,13 @@
+real_world_experiments/wandb/
+real_world_experiments/trained_models/
+real_world_experiments/plots/
+real_world_experiments/results/
+
+synthetic_experiments/__pycache__/
+synthetic_experiments/wandb/
+synthetic_experiments/plots/
+synthetic_experiments/trained_models/
+synthetic_experiments/df*/
+synthetic_experiments/data/
+
+utils/__pycache__
