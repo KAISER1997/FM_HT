@@ -113,7 +113,7 @@ def compute_all_metrics(generated_data,full_data_test,dimension,num_heavy):
 
 
 
-def plot_kde_subplots(test_data, gen_data, n_cols=3, figsize=(15, 4),name,approach, suptitle=None):
+def plot_kde_subplots(test_data, gen_data,  name ,approach, n_cols=3,figsize=(15, 4), suptitle=None):
     """
     Plots KDE comparisons between test and generated data for each dimension.
 

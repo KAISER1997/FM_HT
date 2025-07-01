@@ -1,7 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[ ]:
 
 
 import numpy as np
@@ -16,7 +12,6 @@ from scaler_grad import NativeScalerWithGradNormCount as NativeScaler
 from matplotlib import cm
 
 
-# In[ ]:
 
 
 class WrappedModel(ModelWrapper):
@@ -24,15 +19,11 @@ class WrappedModel(ModelWrapper):
         return self.model(x, t)
 
 
-# In[ ]:
-
 
 print_every = 10
 min_loss=9999999999
 
 
-
-# In[ ]:
 
 
 from typing import Callable
@@ -51,7 +42,6 @@ def t_dir(f, t) -> tuple[Tensor, ...]:
 
 def get_t_dir(dimension,noise2data,Model, x: Tensor, t: Tensor) -> tuple[tuple[Tensor, Tensor], tuple[Tensor, Tensor]]:
     def flow(Xz,timez):
-        # print("XZ_t",Xz.shape,timez.shape)
         param_tail_eps=Model(timez.unsqueeze(1))
         dummy_tail_param2=param_tail_eps.reshape(param_tail_eps.shape[0],4,dimension)
         _unc_pos_tail2,_unc_neg_tail2,shift2,_unc_scale2, = dummy_tail_param2[:,0,:],dummy_tail_param2[:,1,:],dummy_tail_param2[:,2,:],dummy_tail_param2[:,3,:]
@@ -86,7 +76,7 @@ def get_t_dir(dimension,noise2data,Model, x: Tensor, t: Tensor) -> tuple[tuple[T
 
 class HeavyTailedModel(nn.Module):
     def __init__(
-        self,tail_param_net,PreVFnet,NOISE2DATA,dimension,simulation
+        self,tail_param_net,PreVFnet,NOISE2DATA,dimension,simulation=False
     ):
         # self.features = features
         super(HeavyTailedModel, self).__init__()
@@ -137,8 +127,6 @@ class HeavyTailedModel(nn.Module):
         return(velocity_field)                    
 
 
-# In[ ]:
-
 
 class LightTailedModel(nn.Module):
     def __init__(
@@ -166,79 +154,64 @@ class LightTailedModel(nn.Module):
 
         return(velocity_field)                    
 
-
-# In[ ]:
-
+ 
 
 class heavy_tail_FM:
-    def __init__(self,Tail_paramNet,model,TTF,dimension,device):
+    def __init__(self,Tail_paramNet,model,TTF,dimension,iterations,device,steps):
         self.model=model
         self.Tail_paramNet=Tail_paramNet
         self.TTF=TTF
         self.device=device
         self.path = AffineProbPath(scheduler=CondOTScheduler())
         self.dim=dimension
+        self.iterations=iterations
         self.flow_model=HeavyTailedModel(Tail_paramNet,model,TTF,dimension)
-    def train(self,optim1,optim2,n_epochs,train_loader,iterations,steps):
+        self.steps=steps
+        self.count=0
+    def train_epoch(self,optim1,optim2,train_loader,noise_loader,curr_iter):
         loss_scaler = NativeScaler()
-        for iI in range(iterations):
-            for data in train_loader:
-                optim1.zero_grad()
-                optim2.zero_grad()
-
-                x_1=data[0].float().to(self.device)   #batch x 20
-                x_0 = torch.randn_like(x_1).float().to(self.device) #batch x 20
+        iI=curr_iter
+        for data,noise in zip(train_loader,noise_loader):
+            self.count=self.count+1
+            if self.count==self.steps:
+                break
 
 
-                if iI<(3*iterations)//4:
-                    t = 1-torch.sqrt(1-torch.rand(x_1.shape[0])).to(self.device) #best
-                else:
-                    t= -torch.log(1 - torch.rand(x_1.shape[0]) * (1 - torch.exp(torch.tensor(-1)))).to(self.device)
+            optim1.zero_grad()
+            optim2.zero_grad()
 
-                path_sample = self.path.sample(t=t, x_0=x_0, x_1=x_1)
-                x_t,time_t,dx_t=path_sample.x_t,path_sample.t,path_sample.dx_t  #x_t- B X 20
+            x_1=data[0].float().to(self.device)   #batch x 20
+            x_0 = torch.randn_like(x_1).float().to(self.device) #batch x 20
 
 
+            if iI<(3*self.iterations)//4:
+                t = 1-torch.sqrt(1-torch.rand(x_1.shape[0])).to(self.device) #best
+            else:
+                t= -torch.log(1 - torch.rand(x_1.shape[0]) * (1 - torch.exp(torch.tensor(-1)))).to(self.device)
 
-                velocity_field=self.flow_model(x_t,time_t)
+            path_sample = self.path.sample(t=t, x_0=x_0, x_1=x_1)
+            x_t,time_t,dx_t=path_sample.x_t,path_sample.t,path_sample.dx_t  #x_t- B X 20
 
-                
-                loss = torch.pow( velocity_field - dx_t, 2).mean() 
-                print(velocity_field.max(),dx_t.max(),loss)
 
-                loss_scaler(
-                    loss,
-                    optim1,
-                    optim2,
-                    parameters=self.model.parameters(),
-                    parameters2=self.Tail_paramNet.parameters(),
-                    update_grad=True,
-                    approach=2
-                    )      
 
-                jo=jo+1
+            velocity_field=self.flow_model(x_t,time_t)
 
-                if (jo+1) % print_every == 0:
-                    print('| iter {:6d} | {:5.2f} ms/step | loss {:8.3f} '
-                        .format(jo+1, 7, loss.item()))
-                     
-                if (jo)%50==0 and jo>(steps*0.9): 
-                    print("checking",iI)   
+            
+            loss = torch.pow( velocity_field - dx_t, 2).mean() 
+            print("LOSS-",loss)
 
-                    loss_epoch=loss.item()#calc_Wassertein(model,Tail_paramNet,noise2data,full_data_val,dimension)
-                    if loss_epoch<min_loss:
-                        min_loss=loss_epoch
-                        print("saving iteration-",iI)
-                        torch.save(self.Tail_paramNet.state_dict(), 'tailmodel_NEW.pth')
-                        torch.save(self.model.state_dict(),"model_NEW.pth")
-                        self.model.train()
-                        self.Tail_paramNet.train()
-            if jo+1>steps:
-                break  
-         
-        self.Tail_paramNet.load_state_dict(torch.load('tailmodel_NEW.pth'))
-        self.model.load_state_dict(torch.load("model_NEW.pth"))
-        
+            loss_scaler(
+                loss,
+                optim1,
+                optim2,
+                parameters=self.model.parameters(),
+                parameters2=self.Tail_paramNet.parameters(),
+                update_grad=True,
+                approach=2
+                )      
+
+   
+       
     def flow(self,x_t,t):
         return self.flow_model(x_t, t)
     
@@ -281,70 +254,58 @@ class heavy_tail_FM:
 
 
 class Light_tail_FM:
-    def __init__(self,Tail_paramNet,model,TTF,dimension,device):
+    def __init__(self,model,dimension,iterations,device,steps):
         self.model=model
         self.device=device
         self.path = AffineProbPath(scheduler=CondOTScheduler())
         self.dim=dimension
-        self.flow_model=HeavyTailedModel(Tail_paramNet,model,TTF,dimension)
-    def train(self,optim1,optim2,n_epochs,train_loader,iterations,steps):
+        self.flow_model=LightTailedModel(model,dimension,simulation=False).to(device)
+        self.iterations=iterations
+        self.count=0
+        self.steps=steps
+    def train_epoch(self,optim1,train_loader,noise_loader,curr_iter):
         loss_scaler = NativeScaler()
-        for iI in range(iterations):
-            for data in train_loader:
-                optim1.zero_grad()
+        iterations=self.iterations
+        iI=curr_iter
 
-                x_1=data[0].float().to(self.device)   #batch x 20
-                x_0 = torch.randn_like(x_1).float().to(self.device) #batch x 20
+        for data,noise in zip(train_loader,noise_loader):
+            self.count=self.count+1
+            if self.count==self.steps:
+                break
+            optim1.zero_grad()
 
-
-                if iI<(3*iterations)//4:
-                    t = 1-torch.sqrt(1-torch.rand(x_1.shape[0])).to(self.device) #best
-                else:
-                    t= -torch.log(1 - torch.rand(x_1.shape[0]) * (1 - torch.exp(torch.tensor(-1)))).to(self.device)
-
-                path_sample = self.path.sample(t=t, x_0=x_0, x_1=x_1)
-                x_t,time_t,dx_t=path_sample.x_t,path_sample.t,path_sample.dx_t  #x_t- B X 20
+            x_1=data[0].float().to(self.device)   #batch x 20
+            x_0 = noise.float().to(self.device)#torch.randn_like(x_1).float().to(self.device) #batch x 20
 
 
+            if iI<(3*iterations)//4:
+                t = 1-torch.sqrt(1-torch.rand(x_1.shape[0])).to(self.device) #best
+            else:
+                t= -torch.log(1 - torch.rand(x_1.shape[0]) * (1 - torch.exp(torch.tensor(-1)))).to(self.device)
 
-                velocity_field=self.flow_model(x_t,time_t)
+            path_sample = self.path.sample(t=t, x_0=x_0, x_1=x_1)
+            x_t,time_t,dx_t=path_sample.x_t,path_sample.t,path_sample.dx_t  #x_t- B X 20
 
-                
-                loss = torch.pow( velocity_field - dx_t, 2).mean() 
-                print(velocity_field.max(),dx_t.max(),loss)
 
-                loss_scaler(
-                    loss,
-                    optim1,
-                    None,
-                    parameters=self.model.parameters(),
-                    parameters2=None,
-                    update_grad=True,
-                    approach=1
-                    )      
 
-                jo=jo+1
+            velocity_field=self.flow_model(x_t,time_t)
 
-                if (jo+1) % print_every == 0:
-                    print('| iter {:6d} | {:5.2f} ms/step | loss {:8.3f} '
-                        .format(jo+1, 7, loss.item()))
-                     
-                if (jo)%50==0 and jo>(steps*0.9): 
-                    print("checking",iI)   
+            
+            loss = torch.pow( velocity_field - dx_t, 2).mean() 
+            print("LOSS-",loss)
 
-                    loss_epoch=loss.item()#calc_Wassertein(model,Tail_paramNet,noise2data,full_data_val,dimension)
-                    if loss_epoch<min_loss:
-                        min_loss=loss_epoch
-                        print("saving iteration-",iI)
-                        torch.save(self.Tail_paramNet.state_dict(), 'tailmodel_NEW.pth')
-                        torch.save(self.model.state_dict(),"model_NEW.pth")
-                        self.model.train()
-                        self.Tail_paramNet.train()
-            if jo+1>steps:
-                break  
-         
-        self.Tail_paramNet.load_state_dict(torch.load('tailmodel_NEW.pth'))
-        self.model.load_state_dict(torch.load("model_NEW.pth"))
+            loss_scaler(
+                loss,
+                optim1,
+                None,
+                parameters=self.model.parameters(),
+                parameters2=None,
+                update_grad=True,
+                approach=1
+                )      
+
+
+ 
     def flow(self,x_t,t):
         return self.flow_model(x_t, t)
     def generate(self,num_samples):
@@ -366,15 +327,7 @@ class Light_tail_FM:
         self.flow_model.sim=False
         return(generated_data)
 
-
-# In[ ]:
-
-
-get_ipython().system('jupyter nbconvert --to script C_data.ipynb --output C_model.py')
-
-
-# In[ ]:
-
+ 
 
 
 
