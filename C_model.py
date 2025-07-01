@@ -331,3 +331,87 @@ class Light_tail_FM:
 
 
 
+class heavy_tail_input:
+    def __init__(self,Tail_paramNet,model,TTF,dimension,iterations,device,steps):
+        self.model=model
+        self.Tail_paramNet=Tail_paramNet
+        self.TTF=TTF
+        self.device=device
+        self.path = AffineProbPath(scheduler=CondOTScheduler())
+        self.dim=dimension
+        self.iterations=iterations
+        self.flow_model=LightTailedModel(model,dimension,simulation=False).to(device)
+        self.steps=steps
+        self.count=0
+    def train_epoch(self,optim1,optim2,train_loader,noise_loader,curr_iter):
+        loss_scaler = NativeScaler()
+        iI=curr_iter
+        for data,noise in zip(train_loader,noise_loader):
+            self.count=self.count+1
+            if self.count==self.steps:
+                break
+
+
+            optim1.zero_grad()
+            optim2.zero_grad()
+            param_tail=self.tail_param_net(1+0*time_t.unsqueeze(1)) #BX80
+
+            x_1=data[0].float().to(self.device)   #batch x 20
+            x_0 = torch.randn_like(x_1).float().to(self.device) #batch x 20
+            x_0=self.TTF(x_0)
+
+
+            if iI<(3*self.iterations)//4:
+                t = 1-torch.sqrt(1-torch.rand(x_1.shape[0])).to(self.device) #best
+            else:
+                t= -torch.log(1 - torch.rand(x_1.shape[0]) * (1 - torch.exp(torch.tensor(-1)))).to(self.device)
+
+            path_sample = self.path.sample(t=t, x_0=x_0, x_1=x_1)
+            
+            x_t,time_t,dx_t=path_sample.x_t,path_sample.t,path_sample.dx_t  #x_t- B X 20
+            print(x_t,dx_t)
+
+
+
+            velocity_field=self.flow_model(x_t,time_t)
+
+            
+            loss = torch.pow( velocity_field - dx_t, 2).mean() 
+            print("LOSS-",loss)
+
+            loss_scaler(
+                loss,
+                optim1,
+                optim2,
+                parameters=self.model.parameters(),
+                parameters2=self.Tail_paramNet.parameters(),
+                update_grad=True,
+                approach=2
+                )      
+
+   
+       
+    def flow(self,x_t,t):
+        return self.flow_model(x_t, t)
+    
+
+    def generate(self,num_samples):
+        # step size for ode solver
+        self.flow_model.sim=True
+        wrapped_vf = WrappedModel(self.flow_model)
+        step_size = 0.05
+
+
+        batch_size = num_samples  # batch size
+        T = torch.linspace(0,1,10)  # sample times
+        T = T.to(self.device)
+ 
+        x_init = torch.randn((batch_size, self.dim), dtype=torch.float32, device=self.device)
+        solver = ODESolver(velocity_model=wrapped_vf)  
+        sol = solver.sample(time_grid=T, x_init=x_init, method='midpoint', step_size=step_size, return_intermediates=True)  
+        sol = sol.cpu().numpy()
+        generated_data=sol[9]
+        self.flow_model.sim=False
+        return(generated_data)
+    
+    
