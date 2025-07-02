@@ -900,7 +900,7 @@ class TailAffineMarginalTransform_SeparateNetParam2(nn.Module):
         dim=self.dimz
         dummy_tail_param=tail_param.reshape(tail_param.shape[0],self.og_tail_shape[0],self.og_tail_shape[1])
 
-        print("dummy_extreme",dummy_tail_param.shape,z.shape)
+        # print("dummy_extreme",dummy_tail_param.shape,z.shape)
 
         _unc_pos_tail,_unc_neg_tail,shift,_unc_scale =dummy_tail_param[:,0,:],dummy_tail_param[:,1,:],dummy_tail_param[:,2,:],dummy_tail_param[:,3,:]
         """light -> heavy"""

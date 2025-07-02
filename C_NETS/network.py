@@ -85,6 +85,7 @@ class MLP_TailParam2(nn.Module):
         self.time_dim = time_dim
         self.hidden_dim = hidden_dim
         self.output_dim= output_dim
+        self.change_input=nn.Linear(output_dim//4,output_dim//4)
 
         self.main = nn.Sequential(
             nn.Linear(time_dim, hidden_dim),
