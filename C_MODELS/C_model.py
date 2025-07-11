@@ -76,7 +76,7 @@ def get_t_dir(dimension,noise2data,Model, x: Tensor, t: Tensor) -> tuple[tuple[T
 
 class HeavyTailedModel(nn.Module):
     def __init__(
-        self,tail_param_net,PreVFnet,NOISE2DATA,dimension,simulation=False
+        self,tail_param_net,PreVFnet,NOISE2DATA,dimension,method,simulation=False
     ):
         # self.features = features
         super(HeavyTailedModel, self).__init__()
@@ -85,6 +85,7 @@ class HeavyTailedModel(nn.Module):
         self.NOISE2DATA=NOISE2DATA
         self.dimension=dimension
         self.sim=simulation
+        self.method=method
     def forward(self, x_t,time_t):
         #during ode simulation time_t is a single number while when sim=False time_t is a array of different times
         if self.sim:
@@ -98,9 +99,7 @@ class HeavyTailedModel(nn.Module):
         time_t=time_t.reshape(-1).expand(x_t.shape[0])
     
 
-        prefinal_vf=self.PreVFnet(x_t,time_t)
 
-        prefinal_vf=prefinal_vf.reshape(prefinal_vf.shape[0],-1)
             
         param_tail=self.tail_param_net(time_t.unsqueeze(1)) #BX80
 
@@ -110,9 +109,16 @@ class HeavyTailedModel(nn.Module):
 
 
         param_tail=param_tail.reshape(param_tail.shape[0],-1)
-        param_tail_pre_eps=param_tail
 
         phi_t=self.NOISE2DATA.inverse(x_t,param_tail,False,None,None)
+
+        if self.method=='TTF_GRAD':
+            prefinal_vf=self.PreVFnet(x_t,time_t) #CAREFUL WHAT YOU PUT INPUT TO THE BASE NEURAL NETWROK PHI_T OR X_T
+        elif self.method=='TTF_GRAD_LIGHT_INP':
+            prefinal_vf=self.PreVFnet(phi_t,time_t)
+            
+
+        prefinal_vf=prefinal_vf.reshape(prefinal_vf.shape[0],-1)        
 
         jacobian_phi=self.NOISE2DATA.fwd_dTTF_dz(phi_t, param_tail)
         jacobian_param_tail=self.NOISE2DATA.dTTF_dtailparam(phi_t, param_tail)
@@ -157,7 +163,7 @@ class LightTailedModel(nn.Module):
  
 
 class heavy_tail_FM:
-    def __init__(self,Tail_paramNet,model,TTF,dimension,iterations,device,steps):
+    def __init__(self,Tail_paramNet,model,TTF,dimension,iterations,device,steps,method):
         self.model=model
         self.Tail_paramNet=Tail_paramNet
         self.TTF=TTF
@@ -165,9 +171,10 @@ class heavy_tail_FM:
         self.path = AffineProbPath(scheduler=CondOTScheduler())
         self.dim=dimension
         self.iterations=iterations
-        self.flow_model=HeavyTailedModel(Tail_paramNet,model,TTF,dimension)
+        self.flow_model=HeavyTailedModel(Tail_paramNet,model,TTF,dimension,method)
         self.steps=steps
         self.count=0
+        self.method=method
     def train_epoch(self,optim1,optim2,train_loader,noise_loader,curr_iter):
         loss_scaler = NativeScaler()
         iI=curr_iter
@@ -216,24 +223,25 @@ class heavy_tail_FM:
         return self.flow_model(x_t, t)
     
 
-    def generate(self,num_samples):
+    def generate(self,x_init):
         # step size for ode solver
         self.flow_model.sim=True
         wrapped_vf = WrappedModel(self.flow_model)
         step_size = 0.05
 
 
-        batch_size = num_samples  # batch size
+        # batch_size = num_samples  # batch size
         T = torch.linspace(0,1,10)  # sample times
         T = T.to(self.device)
  
-        x_init = torch.randn((batch_size, self.dim), dtype=torch.float32, device=self.device)
+        # x_init = torch.randn((batch_size, self.dim), dtype=torch.float32, device=self.device)
         solver = ODESolver(velocity_model=wrapped_vf)  
         sol = solver.sample(time_grid=T, x_init=x_init, method='midpoint', step_size=step_size, return_intermediates=True)  
         sol = sol.cpu().numpy()
         generated_data=sol[9]
         self.flow_model.sim=False
-        return(generated_data)
+        pathz=sol
+        return(generated_data,pathz)
     
     
 
@@ -308,31 +316,32 @@ class Light_tail_FM:
  
     def flow(self,x_t,t):
         return self.flow_model(x_t, t)
-    def generate(self,num_samples):
+    def generate(self,x_init):
         # step size for ode solver
         self.flow_model.sim=True
         wrapped_vf = WrappedModel(self.flow_model)
         step_size = 0.05
 
 
-        batch_size = num_samples  # batch size
+        # batch_size = num_samples  # batch size
         T = torch.linspace(0,1,10)  # sample times
         T = T.to(self.device)
  
-        x_init = torch.randn((batch_size, self.dim), dtype=torch.float32, device=self.device)
+        # x_init = torch.randn((batch_size, self.dim), dtype=torch.float32, device=self.device)
         solver = ODESolver(velocity_model=wrapped_vf)  
         sol = solver.sample(time_grid=T, x_init=x_init, method='midpoint', step_size=step_size, return_intermediates=True)  
         sol = sol.cpu().numpy()
         generated_data=sol[9]
         self.flow_model.sim=False
-        return(generated_data)
+        pathz=sol
+        return(generated_data,pathz)
 
  
 
 
 
 class heavy_tail_input:
-    def __init__(self,Tail_paramNet,model,TTF,dimension,iterations,device,steps):
+    def __init__(self,Tail_paramNet,model,TTF,dimension,iterations,device,steps,approach=1):
         self.model=model
         self.Tail_paramNet=Tail_paramNet
         self.TTF=TTF
@@ -343,6 +352,7 @@ class heavy_tail_input:
         self.flow_model=LightTailedModel(model,dimension,simulation=False).to(device)
         self.steps=steps
         self.count=0
+        self.approach=approach
     def train_epoch(self,optim1,optim2,train_loader,noise_loader,curr_iter):
         loss_scaler = NativeScaler()
         iI=curr_iter
@@ -354,15 +364,24 @@ class heavy_tail_input:
 
             optim1.zero_grad()
             optim2.zero_grad()
-            const=-1
-            param_tail_pre=self.Tail_paramNet(1+torch.zeros(noise.shape[0],1).to(self.device)) #BX80
-            dummy_tail_param=param_tail_pre.reshape(param_tail_pre.shape[0],4,self.dim)
-            _unc_pos_tail,_unc_neg_tail,shift,_unc_scale =dummy_tail_param[:,0,:]**2+const,dummy_tail_param[:,1,:]**2+const,dummy_tail_param[:,2,:]*0,dummy_tail_param[:,3,:]*0      # i am keeping shift 0 and var softplus(0)     
-            param_tail=torch.cat([_unc_pos_tail,_unc_neg_tail,shift,_unc_scale],1)
+
 
             x_1=data[0].float().to(self.device)   #batch x 20
             x_0 = noise.float().to(self.device)#torch.randn_like(x_1).float().to(self.device) #batch x 20
-            x_0=self.TTF(x_0,param_tail)
+            
+            if self.Tail_paramNet.transform_inp==1:
+                const=-10
+                param_tail_pre=self.Tail_paramNet(1+torch.zeros(noise.shape[0],1).to(self.device)) #BX80
+
+                dummy_tail_param=param_tail_pre.reshape(param_tail_pre.shape[0],4,self.dim)
+                
+                _unc_pos_tail,_unc_neg_tail,shift,_unc_scale =dummy_tail_param[:,0,:]**2+const,dummy_tail_param[:,1,:]**2+const,dummy_tail_param[:,2,:]*0,dummy_tail_param[:,3,:]*0      # i am keeping shift 0 and var softplus(0)     
+                param_tail=torch.cat([_unc_pos_tail,_unc_neg_tail,shift,_unc_scale],1)
+
+
+                x_0=self.TTF(x_0,param_tail)
+                x_0=self.Tail_paramNet.change_input(x_0)
+                # print("hello",alex)
 
 
             if iI<(3*self.iterations)//4:
@@ -391,7 +410,7 @@ class heavy_tail_input:
                 parameters=self.model.parameters(),
                 parameters2=self.Tail_paramNet.parameters(),
                 update_grad=True,
-                approach=2
+                approach=self.approach
                 )      
 
    
@@ -400,31 +419,43 @@ class heavy_tail_input:
         return self.flow_model(x_t, t)
     
 
-    def generate(self,num_samples):
+    def generate(self,x_init):
         # step size for ode solver
         self.flow_model.sim=True
         wrapped_vf = WrappedModel(self.flow_model)
         step_size = 0.01
-        const=-1
-        param_tail_pre=self.Tail_paramNet(1+torch.zeros(num_samples,1).to(self.device)) #BX80
-        dummy_tail_param=param_tail_pre.reshape(param_tail_pre.shape[0],4,self.dim)
-        _unc_pos_tail,_unc_neg_tail,shift,_unc_scale =dummy_tail_param[:,0,:]**2+const,dummy_tail_param[:,1,:]**2+const,dummy_tail_param[:,2,:]*0,dummy_tail_param[:,3,:]*0      # i am keeping shift 0 and var softplus(0)     
-        param_tail=torch.cat([_unc_pos_tail,_unc_neg_tail,shift,_unc_scale],1)
+
         
-        batch_size = num_samples  # batch size
+        # batch_size = num_samples  # batch size
         T = torch.linspace(0,1,10)  # sample times
         T = T.to(self.device)
  
-        x_init = torch.randn((batch_size, self.dim), dtype=torch.float32, device=self.device)
-        x_init=self.TTF(x_init,param_tail)
+        # x_init = torch.randn((batch_size, self.dim), dtype=torch.float32, device=self.device)
+        if self.Tail_paramNet.transform_inp==1:
+            num_samples=x_init.shape[0]
+            const=-10
+            param_tail_pre=self.Tail_paramNet(1+torch.zeros(num_samples,1).to(self.device)) #BX80
+            dummy_tail_param=param_tail_pre.reshape(param_tail_pre.shape[0],4,self.dim)
+            _unc_pos_tail,_unc_neg_tail,shift,_unc_scale =dummy_tail_param[:,0,:]**2+const,dummy_tail_param[:,1,:]**2+const,dummy_tail_param[:,2,:]*0,dummy_tail_param[:,3,:]*0      # i am keeping shift 0 and var softplus(0)     
+            param_tail=torch.cat([_unc_pos_tail,_unc_neg_tail,shift,_unc_scale],1)
+
+
+            x_init=self.TTF(x_init,param_tail)
+
+            # print("hello",alex)
+            x_init=self.Tail_paramNet.change_input(x_init)
+
         solver = ODESolver(velocity_model=wrapped_vf)  
         sol = solver.sample(time_grid=T, x_init=x_init, method='midpoint', step_size=step_size, return_intermediates=True)  
         sol = sol.cpu().numpy()
         generated_data=sol[9]
 
         self.flow_model.sim=False
+        pathz=sol
         
-        
-        return(generated_data)
+        return(generated_data,pathz)
     
-    
+
+
+
+ 

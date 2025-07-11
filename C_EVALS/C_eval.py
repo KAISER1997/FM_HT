@@ -147,7 +147,7 @@ def plot_kde_subplots(test_data, gen_data,  name ,approach, n_cols=3,figsize=(15
         plt.subplots_adjust(top=0.92)
 
     plt.tight_layout()
-    plt.savefig(name+'_'+str(approach)+"kde_comparison.png", dpi=300, bbox_inches='tight')   
+    plt.savefig(name, dpi=300, bbox_inches='tight')   
 
   
     plt.show()

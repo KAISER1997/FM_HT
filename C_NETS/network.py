@@ -1,6 +1,7 @@
 # Activation class
 import torch
 from torch import nn, Tensor
+from C_MODELS.utils.extreme_transforms import softplus,_stable_erfcinv,SQRT_2,SQRT_PI
 
 class Swish(nn.Module):
     def __init__(self):
@@ -79,13 +80,14 @@ class MLP_TailParam(nn.Module):
     
 
 class MLP_TailParam2(nn.Module):
-    def __init__(self, time_dim: int = 1, hidden_dim: int = 128,output_dim: int =8):
+    def __init__(self, time_dim: int = 1, hidden_dim: int = 128,output_dim: int =8,transform_inp: int=0):
         super().__init__()
 
         self.time_dim = time_dim
         self.hidden_dim = hidden_dim
         self.output_dim= output_dim
         self.change_input=nn.Linear(output_dim//4,output_dim//4)
+        self.transform_inp=transform_inp
 
         self.main = nn.Sequential(
             nn.Linear(time_dim, hidden_dim),
@@ -322,4 +324,115 @@ class MLP_diffusion(nn.Module):
         output = self.main(x)
 
         return output
+
+import torch
+import torch.nn as nn
+import numpy as np
+
+import torch
+import torch.nn as nn
+import numpy as np
+
+class TTF_layer(nn.Module):
+    def __init__(self, dim=2,transform='basic'):  # Fixed constructor name
+        super().__init__()      # Fixed super call
+        self.lambd_plus = nn.Parameter(torch.randn(dim))
+        self.lambd_neg = nn.Parameter(torch.randn(dim))
+        self.mu = nn.Parameter(torch.randn(dim))
+        self.sigma = nn.Parameter(torch.randn(dim))
+        self.transform=transform
+
+
+
+    def normalize(self, x):
+        return (1 + torch.tanh(x)) / 4
+
+    def forward(self, z):
+        if self.transform=='basic':
+            sigma = 1e-3 + softplus(self.sigma)
+            lambd_plus = self.normalize(self.lambd_plus)+0.1
+            lambd_neg = self.normalize(self.lambd_neg)+0.1
+
+            sign = torch.sign(z)
+            lambd_s = torch.where(z > 0, lambd_plus, lambd_neg)
+            g = torch.erfc(torch.abs(z) / np.sqrt(2)) + 1e-6  # Safe from zero-power issues
+            x = (torch.pow(g, -lambd_s) - 1) / lambd_s
+            x = sign * x * sigma + self.mu
+        elif self.transform=='Recip_deriv_inv':
+            sigma = 1e-3 + softplus(self.sigma)
+            lambd_plus = softplus(self.lambd_plus)
+            lambd_neg = softplus(self.lambd_neg)
+            grad=self.dTTFInverse_dz(z,lambd_plus,lambd_neg,self.mu,sigma)
+            # print(z.shape,grad.shape,"network")
+            x=z/grad
+
+
+
+
+        return x  # Fixed indentation and removed invisible characters
+    
+
+    def dTTFInverse_dz(self,x, pos_tail, neg_tail,shift, scale): #aditya wrote this
+        s = torch.sign(x - shift)
+        
+        # Compute λₛ based on sign
+        lambda_s = torch.where(s > 0, pos_tail, neg_tail)
+        
+        # Compute y = λₛ|(x - μ)/σ| + 1
+        y = lambda_s * torch.abs((x - shift) / scale) + 1
+        
+        # Compute y^{-1/λₛ - 1}
+        y_pow = torch.pow(y, -1.0/lambda_s - 1)
+        
+        # Compute erfc^{-1}(y^{-1/λₛ})
+        # Note: PyTorch doesn't have direct erfc inverse, so we use inverse of erf and adjust
+        # erfc(z) = 1 - erf(z) => erfc^{-1}(w) = erf^{-1}(1 - w)
+        w = torch.pow(y, -1.0/lambda_s)
+        erfcinv_w =_stable_erfcinv(w, torch.log(w)) #torch.erfinv(1 - w)
+        
+        # Compute exp(erfcinv_w^2)
+        exp_term = torch.exp(torch.square(erfcinv_w))
+        
+        # Combine all terms
+        grad = (1 / scale) * (SQRT_PI/SQRT_2) * y_pow * exp_term
+    
+        return grad   
+ 
+
+class MLP_W_ttflayers(nn.Module):
+    def __init__(self, input_dim: int = 2, time_dim: int = 1, hidden_dim: int = 128,transform='basic'):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.time_dim = time_dim
+        self.hidden_dim = hidden_dim
+
+        self.main = nn.Sequential(
+            nn.Linear(input_dim+time_dim, hidden_dim),
+            # TTF_layer(hidden_dim),
+            Swish(),
+            nn.Linear(hidden_dim, hidden_dim),
+            # TTF_layer(hidden_dim),
+            Swish(),
+            nn.Linear(hidden_dim, hidden_dim),
+            # TTF_layer(hidden_dim),
+            Swish(),
+            nn.Linear(hidden_dim, hidden_dim),
+            # TTF_layer(hidden_dim),
+            Swish(),
+            nn.Linear(hidden_dim, input_dim),
+            TTF_layer(input_dim,transform),
+            )
+
+
+    def forward(self, x: Tensor, t: Tensor) -> Tensor:
+        sz = x.size()
+        x = x.reshape(-1, self.input_dim)
+        t = t.reshape(-1, self.time_dim).float()
+
+        t = t.reshape(-1, 1).expand(x.shape[0], 1)
+        h = torch.cat([x, t], dim=1)
+        output = self.main(h)
+
+        return output.reshape(*sz)
     
